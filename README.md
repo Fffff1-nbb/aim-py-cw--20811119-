@@ -68,3 +68,28 @@ python main.py
 
 CI 只允许修改 `src/main/**`、`README.md` 与 `.agent-sessions/**`（AI 会话归档）——其余文件改了直接红；autopep8 `--diff` 非空即败。提交方式（push、问卷、commit 粒度）见题面"提交与验收"一节。
 
+## 6. 设计说明（你来写）
+
+整体按"感知 → 载体 → 导航 → 决策 → 任务"这条链从上往下写，一层搭一层：
+
+- **Q1 自检**：`hp_ratio` 只干一件事——算百分比、四舍五入、再夹到 0~100；`status_report` 只负责拼字符串，档位判断和逐字符对齐都复用 `hp_ratio` 和 f-string，避免两处口径不一致。
+- **Q2 日志分析**：把"一行能不能解析"拆到 `_parse_sensor_line`、`_parse_json_line` 两个小函数，解析不了就返回 `None` 跳过；主函数只管"分行类型 → 累加 → 统计"。JSON 行用 `seen_ids` 去重。
+- **Q3 载体**：`current_pos` 的 setter 只收长度 2 的 tuple/list，复用 `_clamp_cell` 做转换和夹取；构造器也改成 `self.current_pos = start_pos`，让初始化跟后面的赋值走同一套校验。`move_forward` 先看电量、再扣电、再判碰撞；左右转用两张互逆映射表。
+- **Q4 导航**：`next_step_toward` 只挑"相邻格不是障碍、且曼哈顿距离变近"的方向，有多个候选就优先走坐标差更大的那个轴，没有就返回当前朝向。
+- **Q5 决策**：`decide` 是纯函数，按 R1~R7 的顺序判、命中就返回；输入不合契约就抛 `ValueError`，字段非法就做防御处理（敌距非 int 当 None、机型只认 `"HERO"`）。
+- **Q6 巡逻**：每轮"贪心选向 → 转过去 → 走一步"，贪心卡住时切左手规则沿墙绕，能绕出来就回贪心。`report_to_json` 用 `sort_keys=True` 让输出稳定。
+- **Bonus**：标准 BFS，`start == target` 返回 0，不可达返回 -1。
+
+## 7. Q7 缺陷分析（你来写）
+
+我先跑 `pytest` 拿到报错，再对着每个函数 docstring 里的契约一行行找，一共 6 处：
+
+1. **`total_route_meters`**：累加的是厘米，却直接当米返回，结果大了 100 倍 → 返回时 `// 100`。
+2. **`calibrate`**：`first_positive` 没有正样本时返回 `None`，再拿它做减法就 `TypeError` → 先判 `None` 返回 0。
+3. **`log`**：默认参数 `history=[]` 是可变对象，多次调用会共享同一个列表 → 改成 `None` 再在函数里初始化。
+4. **`summarize_events`**：`< max_id` 把 id 刚好等于 `max_id` 的事件漏了（契约是"不超过"）→ 改 `<=`。
+5. **`run_legacy_sim` 的终止条件**：写反成 `stamina > 20` 就 break → 改成 `stamina <= 20` 才停。
+6. **`run_legacy_sim` 缺自增**：循环体少了 `round_ += 1` → 补上，不然死循环。
+
+其中 5、6 是一对互相遮的：只修 6，第一轮就 break；只修 5，就死循环。必须一起修。
+
