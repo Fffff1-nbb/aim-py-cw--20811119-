@@ -1,3 +1,4 @@
+# aim-py-cw-known
 # -*- coding: utf-8 -*-
 """AIM 2627 Python Coursework —— 哨兵 Sentry 控制模块（学生骨架）。
 
@@ -35,22 +36,110 @@ class Facing(Enum):
 # Q1 机器人自检（题面 Q1·自检状态计算与报告生成）
 # ---------------------------------------------------------------------------
 def hp_ratio(hp, max_hp):
-    """TODO(Q1)：血量百分比，返回 0-100 的 int；计算与边界规则见题面 Q1 规范。"""
-    raise NotImplementedError("Q1 hp_ratio：题面 Q1·血量百分比与精度保障")
+    """血量百分比，返回 0-100 的 int（四舍五入并夹取到 0-100）。"""
+    if max_hp <= 0:
+        return 0
+    return max(0, min(100, round(hp * 100 / max_hp)))
 
 
 def status_report(name, robot_type, hp, max_hp, battery):
-    """TODO(Q1)：一行自检报告字符串；档位判定与逐字符格式见题面 Q1 规范。"""
-    raise NotImplementedError("Q1 status_report：题面 Q1·电量映射与报告格式")
+    """一行自检报告字符串；档位判定与逐字符格式见题面 Q1 规范。"""
+    hp_pct = hp_ratio(hp, max_hp)
+    if battery >= 60:
+        tier = "OK"
+    elif battery >= 20:
+        tier = "WARNING"
+    else:
+        tier = "LOW"
+    return f"{name:<10}|{robot_type:^10}|HP {hp_pct:>3}%|BAT {battery:>3}%|{tier}"
 
 
 # ---------------------------------------------------------------------------
 # Q2 战斗日志分析（题面 Q2·多源日志解析与统计）
 # ---------------------------------------------------------------------------
+_ARMOR_MAP = {"F": "front", "L": "left", "R": "right"}
+
+
+def _parse_sensor_line(text):
+    """解析传感器行（如 "F:32,L:5,R:12"），返回 [(armor, damage), ...]；脏行返回 None。"""
+    events = []
+    for part in text.split(","):
+        part = part.strip()
+        letter, sep, val = part.partition(":")
+        if not sep:
+            return None
+        letter = letter.strip()
+        val = val.strip()
+        if letter not in _ARMOR_MAP or not val.isdigit() or int(val) <= 0:
+            return None
+        events.append((_ARMOR_MAP[letter], int(val)))
+    return events if events else None
+
+
+def _parse_json_line(text):
+    """解析 JSON 行，返回 (armor, damage, id)；脏行返回 None。"""
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    armor = obj.get("armor")
+    damage = obj.get("damage")
+    if armor not in ("front", "left", "right"):
+        return None
+    if isinstance(damage, bool) or not isinstance(damage, int) or damage <= 0:
+        return None
+    return (armor, damage, obj.get("id"))
+
+
 def analyze_damage_log(lines):
-    """TODO(Q2)：解析混合格式伤害日志，返回固定契约的统计 dict；
-    行格式、去重与统计口径见题面 Q2 规范。"""
-    raise NotImplementedError("Q2 analyze_damage_log：题面 Q2·多源日志解析与统计")
+    """解析混合格式伤害日志，返回固定契约的统计 dict。"""
+    total = 0
+    by_armor = {"front": 0, "left": 0, "right": 0}
+    seen_ids = set()
+    n_events = 0
+
+    for line in lines:
+        if not isinstance(line, str):
+            continue
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+
+        if text.startswith("{"):
+            ev = _parse_json_line(text)
+            if ev is None:
+                continue
+            armor, damage, eid = ev
+            if eid is not None:
+                try:
+                    if eid in seen_ids:
+                        continue
+                    seen_ids.add(eid)
+                except TypeError:
+                    pass  # 不可哈希的 id：无法去重，按独立行计
+            total += damage
+            by_armor[armor] += damage
+            n_events += 1
+        else:
+            events = _parse_sensor_line(text)
+            if events is None:
+                continue
+            for armor, damage in events:
+                total += damage
+                by_armor[armor] += damage
+                n_events += 1
+
+    if n_events == 0:
+        most_hit = None
+        avg = 0.0
+    else:
+        most_hit = max(by_armor, key=lambda k: by_armor[k])
+        avg = round(total / n_events, 2)
+
+    return {"total": total, "by_armor": by_armor,
+            "most_hit": most_hit, "avg": avg}
 
 
 # ---------------------------------------------------------------------------
