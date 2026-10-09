@@ -12,6 +12,7 @@
 - `python main.py`（或 PYTHONPATH=src python -m main）可看 ASCII 演示。
 """
 import json
+from collections import deque
 from enum import Enum
 
 
@@ -30,6 +31,12 @@ class Facing(Enum):
     def delta(self):
         """该朝向的单位位移向量 (dx, dy)。"""
         return self.value[0], self.value[1]
+
+
+# 左转 / 右转朝向映射（Q3 转向与 Q6 沿墙脱困共用）。
+_TURN_LEFT = {Facing.UP: Facing.LEFT, Facing.LEFT: Facing.DOWN,
+              Facing.DOWN: Facing.RIGHT, Facing.RIGHT: Facing.UP}
+_TURN_RIGHT = {v: k for k, v in _TURN_LEFT.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +176,7 @@ class SentryGrid:
         self._facing = facing
         self._fuel = int(fuel)
         self._collision_count = 0
-        self._pos = self._clamp_cell(start_pos)
+        self.current_pos = start_pos
         if self._pos in self._obstacles:
             raise ValueError("start_pos 不能位于障碍物上")
 
@@ -228,30 +235,76 @@ class SentryGrid:
 
     @current_pos.setter
     def current_pos(self, value):
-        """TODO(Q3)：位置 setter；三重输入校验见题面 Q3 规范第 1 条。"""
-        raise NotImplementedError("Q3 current_pos.setter：题面 Q3·位置校验三步")
+        """位置 setter：仅接受长度 2 的 tuple/list，元素转 int 并夹取后存储。"""
+        if not isinstance(value, (tuple, list)):
+            raise TypeError("current_pos 需要长度为 2 的 tuple/list")
+        if len(value) != 2:
+            raise TypeError("current_pos 需要长度为 2 的 tuple/list")
+        self._pos = self._clamp_cell(value)
 
     def move_forward(self):
-        """TODO(Q3)：朝当前 facing 前进一格，返回执行后的位置；
-        碰撞、耗电与断电语义见题面 Q3 规范。"""
-        raise NotImplementedError("Q3 move_forward：题面 Q3·前进、碰撞与断电")
+        """朝当前 facing 前进一格，返回执行后的位置。
+
+        断电（电量 <= 0）不位移；碰撞（前方障碍或越界）位置与朝向不变、
+        collision_count 加 1；前进消耗 1 单位电量。
+        """
+        if self._fuel <= 0:
+            return self._pos
+        self._fuel -= 1
+        nx = self._pos[0] + self._facing.delta[0]
+        ny = self._pos[1] + self._facing.delta[1]
+        if self.is_blocked(nx, ny):
+            self._collision_count += 1
+            return self._pos
+        self._pos = (nx, ny)
+        return self._pos
 
     def turn_left(self):
-        """TODO(Q3)：原地左转 90°，返回新的 Facing（不耗电）。"""
-        raise NotImplementedError("Q3 turn_left")
+        """原地左转 90°，返回新的 Facing（不耗电）。"""
+        self._facing = _TURN_LEFT[self._facing]
+        return self._facing
 
     def turn_right(self):
-        """TODO(Q3)：原地右转 90°，返回新的 Facing（不耗电）。"""
-        raise NotImplementedError("Q3 turn_right")
+        """原地右转 90°，返回新的 Facing（不耗电）。"""
+        self._facing = _TURN_RIGHT[self._facing]
+        return self._facing
 
 
 # ---------------------------------------------------------------------------
 # Q4 贪心导航（题面 Q4·单步贪心导航策略）
 # ---------------------------------------------------------------------------
 def next_step_toward(pos, target, obstacles, current_facing=Facing.UP):
-    """TODO(Q4)：返回下一步应朝向的 Facing；
-    候选判定、优先级与回退规则见题面 Q4 规范。"""
-    raise NotImplementedError("Q4 next_step_toward：题面 Q4·贪心策略与回退")
+    """返回下一步应朝向的 Facing。
+
+    候选 = 相邻格非障碍且到目标的曼哈顿距离严格减小；多个候选时优先走
+    绝对坐标差更大的轴；无候选时返回 current_facing（本函数不感知边界）。
+    """
+    dx = target[0] - pos[0]
+    dy = target[1] - pos[1]
+    cur_dist = abs(dx) + abs(dy)
+    obstacles = set(obstacles)
+
+    candidates = []
+    for f in Facing:
+        nx = pos[0] + f.delta[0]
+        ny = pos[1] + f.delta[1]
+        if (nx, ny) in obstacles:
+            continue
+        if abs(nx - target[0]) + abs(ny - target[1]) < cur_dist:
+            candidates.append(f)
+
+    if not candidates:
+        return current_facing
+
+    if abs(dx) >= abs(dy):
+        for f in candidates:
+            if f.delta[0] != 0:
+                return f
+    else:
+        for f in candidates:
+            if f.delta[1] != 0:
+                return f
+    return candidates[0]
 
 
 # ---------------------------------------------------------------------------
@@ -268,31 +321,200 @@ class SentryState(Enum):
 
 
 def decide(sensor, state, hp, heat):
-    """TODO(Q5)：纯函数决策，返回 (action: str, new_state: SentryState)；
-    sensor 字段契约、R1-R7 规则表与非法输入处理见题面 Q5 规范。"""
-    raise NotImplementedError("Q5 decide：题面 Q5·决策规则表 R1-R7")
+    """纯函数决策，返回 (action: str, new_state: SentryState)。
+
+    按 R1-R7 固定顺序求值，首条命中即返回；契约外输入（sensor 缺字段、
+    enemy_frames 空或长度超 6、state 非 SentryState）抛 ValueError。
+    heat 为接口保留参数，当前规则表不参与判定。
+    """
+    if not isinstance(sensor, dict):
+        raise ValueError("sensor 必须是 dict")
+    for key in ("enemy_frames", "enemy_dist", "robot_type", "max_hp"):
+        if key not in sensor:
+            raise ValueError("sensor 缺少字段：{}".format(key))
+    if not isinstance(state, SentryState):
+        raise ValueError("state 必须是 SentryState 成员")
+
+    frames_raw = sensor["enemy_frames"]
+    if not isinstance(frames_raw, (tuple, list)) or not 1 <= len(frames_raw) <= 6:
+        raise ValueError("enemy_frames 须为长度 1-6 的 tuple/list")
+    frames = [bool(f) for f in frames_raw]
+    visible = frames[-1]
+
+    # 敌距规范化：int（非 bool）保留，其余按 None 处理。
+    dist = sensor["enemy_dist"]
+    if isinstance(dist, bool) or not isinstance(dist, int):
+        dist = None
+
+    # 机型规范化：仅 "HERO" 视为英雄，其余按步兵处理。
+    is_hero = sensor["robot_type"] == "HERO"
+
+    hp_pct = hp_ratio(hp, sensor["max_hp"])
+
+    def engage_action():
+        if dist is not None and dist <= 3:
+            return "SHOOT", SentryState.ENGAGE
+        return ("MOVE_RIGHT" if is_hero else "MOVE_LEFT"), SentryState.ENGAGE
+
+    # R1 保命优先
+    if hp_pct <= 30:
+        return "RETREAT", SentryState.RETREAT
+
+    # R2 撤退保持（R1 已拦截 hp_pct <= 30，此处必已恢复安全血量）
+    if state == SentryState.RETREAT:
+        return "RETURN", SentryState.RETURN
+
+    # R3 返航单帧
+    if state == SentryState.RETURN:
+        return "MOVE_BASE", SentryState.PATROL
+
+    # R4 / R5 交火
+    if state == SentryState.ENGAGE:
+        if visible:
+            return engage_action()
+        # 短暂丢失（上一帧仍可见）→ 保持；持续丢失 → 转 SUSPECT
+        if len(frames) >= 2 and frames[-2]:
+            return "HOLD_FIRE", SentryState.ENGAGE
+        return "SCAN", SentryState.SUSPECT
+
+    # R6 / R7：PATROL / SUSPECT
+    if visible:
+        if len(frames) >= 2 and frames[-2]:
+            return engage_action()
+        return "SCAN", SentryState.SUSPECT
+    if state == SentryState.PATROL:
+        return "PATROL_MOVE", SentryState.PATROL
+    return "SCAN", SentryState.SUSPECT
 
 
 # ---------------------------------------------------------------------------
 # Q6 巡逻任务（题面 Q6·巡逻契约与验收阈值）
 # ---------------------------------------------------------------------------
 def run_patrol(grid, max_steps=500):
-    """TODO(Q6)：sense → decide → act 主循环；
-    循环结构、终止条件、脱困自由度与统计返回契约见题面 Q6 规范。"""
-    raise NotImplementedError("Q6 run_patrol：题面 Q6·主循环与统计契约")
+    """贪心导航 + 沿墙脱困 的巡逻主循环，返回统计 dict。
+
+    每轮：贪心选向（失速时切入左手规则沿墙脱困）→ 对齐朝向 → 前进一步。
+    终止：到达 enemy_pos / 步数用尽 / 电量耗尽。
+    """
+    enemy = grid.enemy_pos
+    steps = 0
+    visited = {grid.current_pos}
+    wall = False
+    hand = "L"
+    wall_steps = 0
+    entry_dist = 0
+    limit = grid.width + grid.height
+
+    def manhattan(a, b):
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def has_candidate(pos):
+        dist = manhattan(pos, enemy)
+        for f in Facing:
+            nx = pos[0] + f.delta[0]
+            ny = pos[1] + f.delta[1]
+            if not grid.is_blocked(nx, ny) and manhattan((nx, ny), enemy) < dist:
+                return True
+        return False
+
+    rights = {Facing.UP: 0, Facing.RIGHT: 1,
+              Facing.DOWN: 2, Facing.LEFT: 3}
+
+    while steps < max_steps and grid.fuel > 0 and not grid.found_enemy:
+        pos = grid.current_pos
+
+        # 贪心失速 → 切入沿墙脱困
+        if not wall and not has_candidate(pos):
+            wall = True
+            hand = "L"
+            wall_steps = 0
+            entry_dist = manhattan(pos, enemy)
+
+        if wall:
+            side = (_TURN_LEFT[grid.facing] if hand == "L"
+                    else _TURN_RIGHT[grid.facing])
+            opposite = (_TURN_RIGHT[grid.facing] if hand == "L"
+                        else _TURN_LEFT[grid.facing])
+
+            def cell(f):
+                return (pos[0] + f.delta[0], pos[1] + f.delta[1])
+
+            if not grid.is_blocked(*cell(side)):
+                if hand == "L":
+                    grid.turn_left()
+                else:
+                    grid.turn_right()
+            elif grid.is_blocked(*cell(grid.facing)):
+                if not grid.is_blocked(*cell(opposite)):
+                    if hand == "L":
+                        grid.turn_right()
+                    else:
+                        grid.turn_left()
+                else:
+                    grid.turn_right()
+                    grid.turn_right()
+        else:
+            direction = next_step_toward(
+                pos, enemy, grid.obstacles, grid.facing)
+            diff = (rights[direction] - rights[grid.facing]) % 4
+            if diff == 3:
+                grid.turn_left()
+            else:
+                for _ in range(diff):
+                    grid.turn_right()
+
+        grid.move_forward()
+        steps += 1
+        visited.add(grid.current_pos)
+
+        if wall:
+            wall_steps += 1
+            if wall_steps > limit and hand == "L":
+                hand = "R"
+                wall_steps = 0
+            elif wall_steps > 2 * limit:
+                wall = False
+            elif (has_candidate(grid.current_pos)
+                  and manhattan(grid.current_pos, enemy) < entry_dist + 1):
+                wall = False
+
+    found = grid.found_enemy
+    return {"steps": steps,
+            "collisions": grid.collision_count,
+            "visited_count": len(visited),
+            "found_enemy": found,
+            "success": found}
 
 
 def report_to_json(stats):
-    """TODO(Q6)：把 stats 序列化为确定性的 JSON 字符串，见题面 Q6 规范。"""
-    raise NotImplementedError("Q6 report_to_json：题面 Q6·报告序列化")
+    """把 stats 序列化为确定性的 JSON 字符串（键排序保证稳定）。"""
+    return json.dumps(stats, sort_keys=True)
 
 
 # ---------------------------------------------------------------------------
 # Bonus：BFS 全局最短路（题面 Bonus·BFS 语义与排行榜）
 # ---------------------------------------------------------------------------
 def bfs_path_length(start, target, obstacles):
-    """TODO(Bonus)：BFS 全局最短路步数；返回语义与边界职责见题面 Bonus 规范。"""
-    raise NotImplementedError("Bonus bfs_path_length")
+    """BFS 全局最短路步数；start == target 返回 0，目标不可达返回 -1。
+
+    obstacles 须由调用方包含地图边界，否则对不可达目标的搜索不会终止。
+    """
+    obstacles = set(obstacles)
+    if start == target:
+        return 0
+    queue = deque([(start, 0)])
+    seen = {start}
+    while queue:
+        cur, dist = queue.popleft()
+        for f in Facing:
+            nxt = (cur[0] + f.delta[0], cur[1] + f.delta[1])
+            if nxt in obstacles or nxt in seen:
+                continue
+            if nxt == target:
+                return dist + 1
+            seen.add(nxt)
+            queue.append((nxt, dist + 1))
+    return -1
 
 
 # ---------------------------------------------------------------------------
